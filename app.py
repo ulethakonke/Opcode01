@@ -1,7 +1,7 @@
 # app.py
 import streamlit as st
 import numpy as np
-import cv2
+from PIL import Image, ImageDraw
 import json
 import zipfile
 from io import BytesIO
@@ -14,52 +14,48 @@ uploaded_file = st.file_uploader(
 )
 
 if uploaded_file is not None:
-    # Read image
-    file_bytes = np.frombuffer(uploaded_file.read(), np.uint8)
-    img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    st.image(img_rgb, caption="Original Image", use_column_width=True)
+    img = Image.open(uploaded_file).convert("RGB")
+    st.image(img, caption="Original Image", use_column_width=True)
 
     # ---------------- Encode ---------------- #
     def encode_image(image, max_shapes=50):
         """Convert image to symbolic shapes (triangles)"""
-        h, w, _ = image.shape
-        symbolic = []
-        
-        # Resize small for speed
-        small = cv2.resize(image, (64, 64), interpolation=cv2.INTER_AREA)
-        small_h, small_w, _ = small.shape
-        
-        # Simple color quantization
-        Z = small.reshape((-1, 3))
-        Z = np.float32(Z)
-        K = min(max_shapes, 8)  # max colors
-        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
-        _, labels, centers = cv2.kmeans(Z, K, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
-        centers = np.uint8(centers)
-        labels = labels.flatten()
+        image_small = image.resize((64, 64))
+        data = np.array(image_small)
+        h, w, _ = data.shape
 
-        # Make symbolic shapes
-        for i, c in enumerate(centers):
-            # triangle example
-            points = [[i*6, i*6], [i*6+5, i*6], [i*6+2, i*6+5]]
-            symbolic.append({
-                "type": "triangle",
-                "color": [int(c[0]), int(c[1]), int(c[2])],
-                "points": points
-            })
+        # Simple color quantization: take mean of blocks
+        symbolic = []
+        step = max(1, int(np.sqrt(64*64 / max_shapes)))
+        idx = 0
+        for y in range(0, h, step):
+            for x in range(0, w, step):
+                color_block = data[y:y+step, x:x+step].mean(axis=(0,1))
+                color = [int(c) for c in color_block]
+                points = [[x, y], [x+step, y], [x+step//2, y+step]]
+                symbolic.append({
+                    "type": "triangle",
+                    "color": color,
+                    "points": points
+                })
+                idx += 1
+                if idx >= max_shapes:
+                    break
+            if idx >= max_shapes:
+                break
         return symbolic
 
-    symbolic = encode_image(img_rgb)
+    symbolic = encode_image(img)
     st.write("Symbolic shapes generated:", len(symbolic))
 
     # ---------------- Render ---------------- #
     def render_symbols(symbolic, size=(512,512)):
-        canvas = np.zeros((size[1], size[0], 3), dtype=np.uint8)
+        canvas = Image.new("RGB", size, (0,0,0))
+        draw = ImageDraw.Draw(canvas)
         for op in symbolic:
             if op["type"] == "triangle":
-                pts = np.array(op["points"], np.int32)
-                cv2.fillPoly(canvas, [pts], color=op["color"].tolist())
+                pts = [tuple(p) for p in op["points"]]
+                draw.polygon(pts, fill=tuple(op["color"]))
         return canvas
 
     rendered = render_symbols(symbolic)
