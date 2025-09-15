@@ -1,37 +1,35 @@
 import streamlit as st
 import numpy as np
 import cv2
-
-# Dummy symbolic data for testing
-symbolic = [
-    {"points": [(50, 50), (150, 50), (100, 150)]},
-    {"points": [(200, 200), (250, 220), (240, 280), (190, 260)]},
-]
-
-def render_symbols(symbolic):
-    # Create a blank white canvas
-    canvas = np.ones((400, 400, 3), dtype=np.uint8) * 255
-
-    for op in symbolic:
-        pts = np.array(op.get("points", []), dtype=np.int32)
-
-        # ✅ Skip if empty or wrong shape
-        if pts.size == 0:
-            continue  
-
-        # Reshape for cv2 polylines/polygons
-        pts = pts.reshape((-1, 1, 2))
-
-        # Draw polygon with black border
-        cv2.polylines(canvas, [pts], isClosed=True, color=(0, 0, 0), thickness=2)
-        cv2.fillPoly(canvas, [pts], color=(200, 200, 200))  # light gray fill
-
-    return canvas
+import json
 
 st.title("Symbol Renderer")
 
-try:
-    decoded = render_symbols(symbolic)
-    st.image(decoded, channels="BGR", caption="Rendered Symbols")
-except Exception as e:
-    st.error(f"Rendering failed: {e}")
+# --- File uploader for your own symbolic data ---
+uploaded_file = st.file_uploader("Upload your symbolic.json", type="json")
+
+if uploaded_file is not None:
+    symbolic = json.load(uploaded_file)
+
+    def render_symbols(symbolic):
+        canvas = np.ones((800, 800, 3), dtype=np.uint8) * 255  # bigger canvas
+
+        for op in symbolic:
+            pts = np.array(op.get("points", []), dtype=np.int32)
+
+            if pts.size == 0:
+                continue  
+
+            pts = pts.reshape((-1, 1, 2))
+            cv2.polylines(canvas, [pts], isClosed=True, color=(0, 0, 0), thickness=2)
+            cv2.fillPoly(canvas, [pts], color=(200, 200, 200))
+
+        return canvas
+
+    try:
+        decoded = render_symbols(symbolic)
+        st.image(decoded, channels="BGR", caption="Rendered Symbols")
+    except Exception as e:
+        st.error(f"Rendering failed: {e}")
+else:
+    st.info("👆 Upload a symbolic.json file to render your real shapes.")
