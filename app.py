@@ -1,78 +1,97 @@
 import streamlit as st
-from PIL import Image
 import numpy as np
-import json
+from PIL import Image
 import io
+import base64
+import json
+import zlib
 
-# -----------------------------
+# -------------------------------
 # Helper functions
-# -----------------------------
+# -------------------------------
 
-def quantize_image(img, num_colors=4):
-    """
-    Reduce image to num_colors using Pillow quantization
-    """
-    img_small = img.convert("RGB").quantize(colors=num_colors, method=Image.MEDIANCUT)
-    palette = img_small.getpalette()[:num_colors*3]  # flat list of RGBs
-    palette_rgb = [tuple(palette[i:i+3]) for i in range(0, len(palette), 3)]
-    data = np.array(img_small)
-    return palette_rgb, data
+def image_to_symbolic(img, grid_size=32):
+    """Convert image to low-res symbolic representation."""
+    img_small = img.resize((grid_size, grid_size))
+    img_arr = np.array(img_small)
+    symbolic = []
+    for y in range(grid_size):
+        for x in range(grid_size):
+            color = img_arr[y, x].tolist()
+            symbolic.append({"x": x, "y": y, "color": color})
+    return symbolic, img_small.size
 
-def encode_to_json(img, num_colors=4, downscale=16):
-    """
-    Encode image to compact JSON
-    """
-    img_small = img.resize((downscale, downscale))
-    palette, indices = quantize_image(img_small, num_colors=num_colors)
-    
-    symbolic = {
-        "width": downscale,
-        "height": downscale,
-        "palette": palette,
-        "pixels": indices.tolist()
+def extract_patches(img, patch_size=16, threshold=30):
+    """Extract patches where color differs from low-res symbolic image."""
+    img_arr = np.array(img)
+    patches = []
+    h, w = img_arr.shape[:2]
+    for y in range(0, h, patch_size):
+        for x in range(0, w, patch_size):
+            patch = img_arr[y:y+patch_size, x:x+patch_size]
+            # Calculate variance to decide if patch is needed
+            if patch.var() > threshold:
+                pil_patch = Image.fromarray(patch)
+                buf = io.BytesIO()
+                pil_patch.save(buf, format="PNG", optimize=True)
+                b64 = base64.b64encode(buf.getvalue()).decode()
+                patches.append({"x": x, "y": y, "data": b64})
+    return patches
+
+def encode_image(img, grid_size=32, patch_size=16):
+    symbolic, size = image_to_symbolic(img, grid_size)
+    patches = extract_patches(img, patch_size)
+    encoded = {
+        "width": img.width,
+        "height": img.height,
+        "grid_size": grid_size,
+        "patch_size": patch_size,
+        "symbolic": symbolic,
+        "patches": patches
     }
+    return encoded
+
+def decode_image(encoded):
+    width = encoded["width"]
+    height = encoded["height"]
+    grid_size = encoded["grid_size"]
+    patch_size = encoded["patch_size"]
     
-    json_bytes = json.dumps(symbolic, separators=(',', ':')).encode()
-    return symbolic, json_bytes
-
-def decode_from_json(symbolic, upscale=32):
-    """
-    Decode JSON back to image
-    """
-    width = symbolic["width"]
-    height = symbolic["height"]
-    palette = symbolic["palette"]
-    pixels = np.array(symbolic["pixels"], dtype=np.uint8)
+    canvas = Image.new("RGB", (width, height))
+    symbolic = encoded["symbolic"]
+    sym_img = Image.new("RGB", (grid_size, grid_size))
+    sym_pixels = sym_img.load()
+    for p in symbolic:
+        x, y = p["x"], p["y"]
+        sym_pixels[x, y] = tuple(p["color"])
+    # Upscale symbolic to full size
+    sym_full = sym_img.resize((width, height), Image.NEAREST)
+    canvas.paste(sym_full)
     
-    img_array = np.zeros((height, width, 3), dtype=np.uint8)
-    for i in range(height):
-        for j in range(width):
-            img_array[i,j] = palette[pixels[i,j]]
-    
-    img = Image.fromarray(img_array)
-    img_up = img.resize((upscale, upscale), Image.NEAREST)
-    return img_up
+    # Apply patches
+    for patch in encoded["patches"]:
+        patch_data = base64.b64decode(patch["data"])
+        patch_img = Image.open(io.BytesIO(patch_data))
+        canvas.paste(patch_img, (patch["x"], patch["y"]))
+    return canvas
 
-# -----------------------------
-# Streamlit App
-# -----------------------------
+# -------------------------------
+# Streamlit UI
+# -------------------------------
 
-st.title("Compact Image Encoder (~1 KB)")
-
-st.markdown("""
-Upload an image to encode it into a tiny JSON representation (~1 KB for small images) 
-and decode it back to a PNG.
-""")
+st.title("Hybrid Symbolic + Patch Image Codec")
 
 # Upload image
-uploaded_file = st.file_uploader("Upload an Image", type=["png","jpg","jpeg"])
-if uploaded_file is not None:
-    img = Image.open(uploaded_file)
+uploaded_file = st.file_uploader("Upload Image (PNG/JPG)", type=["png", "jpg", "jpeg"])
+if uploaded_file:
+    img = Image.open(uploaded_file).convert("RGB")
     st.image(img, caption="Original Image", use_column_width=True)
     
     # Encode
-    symbolic, json_bytes = encode_to_json(img, num_colors=4, downscale=16)
-    st.success(f"Image encoded successfully! JSON size: {len(json_bytes)} bytes")
+    encoded = encode_image(img)
+    json_bytes = json.dumps(encoded, indent=2).encode()
+    
+    st.success(f"Image encoded! JSON size: {len(json_bytes)//1024} KB")
     
     # Download JSON
     st.download_button(
@@ -83,19 +102,18 @@ if uploaded_file is not None:
     )
 
 # Upload JSON to decode
-uploaded_json = st.file_uploader("Upload Symbolic JSON to Decode", type=["json"])
-if uploaded_json is not None:
-    symbolic_data = json.load(uploaded_json)
-    canvas = decode_from_json(symbolic_data, upscale=128)
+json_file = st.file_uploader("Upload Encoded JSON to Decode", type=["json"])
+if json_file:
+    encoded_data = json.load(json_file)
+    canvas = decode_image(encoded_data)
     st.image(canvas, caption="Decoded Image", use_column_width=True)
     
-    # Download PNG
+    # Download decoded PNG
     buf = io.BytesIO()
-    canvas.save(buf, format="PNG")
-    byte_im = buf.getvalue()
+    canvas.save(buf, format="PNG", optimize=True)
     st.download_button(
         label="Download Decoded PNG",
-        data=byte_im,
-        file_name="decoded_image.png",
+        data=buf.getvalue(),
+        file_name="decoded.png",
         mime="image/png"
     )
