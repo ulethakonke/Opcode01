@@ -1,73 +1,61 @@
-# app.py
 import streamlit as st
-import numpy as np
 from PIL import Image, ImageDraw
+import numpy as np
 import json
-import zipfile
-from io import BytesIO
+import io
 
-st.title("Symbolic Image Encoder & Renderer")
+st.title("Symbolic Image Encoder / Decoder")
 
-# ---------------- Upload ---------------- #
-uploaded_file = st.file_uploader(
-    "Upload an image (PNG/JPG)", type=["png", "jpg", "jpeg"]
-)
+st.sidebar.header("1️⃣ Upload an Image to Encode")
+uploaded_img = st.sidebar.file_uploader("Choose an image", type=["png", "jpg", "jpeg"])
 
-if uploaded_file is not None:
-    img = Image.open(uploaded_file).convert("RGB")
+tile_size = st.sidebar.slider("Tile size (smaller = more detail)", min_value=2, max_value=32, value=8)
+
+if uploaded_img:
+    img = Image.open(uploaded_img).convert("RGB")
     st.image(img, caption="Original Image", use_column_width=True)
+    
+    # Encode to symbolic JSON
+    pixels = np.array(img)
+    h, w = pixels.shape[:2]
+    symbolic = []
+    for y in range(0, h, tile_size):
+        for x in range(0, w, tile_size):
+            tile = pixels[y:y+tile_size, x:x+tile_size]
+            avg_color = tuple(tile.reshape(-1,3).mean(axis=0).astype(int))
+            symbolic.append({
+                "type": "rectangle",
+                "color": list(avg_color),
+                "coords": [int(x), int(y), int(min(x+tile_size, w)), int(min(y+tile_size, h))]
+            })
 
-    # ---------------- Encode ---------------- #
-    def encode_image(image, max_shapes=50):
-        """Convert image to symbolic shapes (triangles)"""
-        image_small = image.resize((64, 64))
-        data = np.array(image_small)
-        h, w, _ = data.shape
+    json_bytes = json.dumps(symbolic, indent=2).encode()
+    st.download_button("Download Symbolic JSON", data=json_bytes, file_name="symbolic.json", mime="application/json")
 
-        # Simple color quantization: take mean of blocks
-        symbolic = []
-        step = max(1, int(np.sqrt(64*64 / max_shapes)))
-        idx = 0
-        for y in range(0, h, step):
-            for x in range(0, w, step):
-                color_block = data[y:y+step, x:x+step].mean(axis=(0,1))
-                color = [int(c) for c in color_block]
-                points = [[x, y], [x+step, y], [x+step//2, y+step]]
-                symbolic.append({
-                    "type": "triangle",
-                    "color": color,
-                    "points": points
-                })
-                idx += 1
-                if idx >= max_shapes:
-                    break
-            if idx >= max_shapes:
-                break
-        return symbolic
+st.sidebar.header("2️⃣ Upload Symbolic JSON to Decode")
+uploaded_json = st.sidebar.file_uploader("Choose symbolic JSON", type=["json"])
 
-    symbolic = encode_image(img)
-    st.write("Symbolic shapes generated:", len(symbolic))
-
-    # ---------------- Render ---------------- #
-    def render_symbols(symbolic, size=(512,512)):
-        canvas = Image.new("RGB", size, (0,0,0))
-        draw = ImageDraw.Draw(canvas)
-        for op in symbolic:
-            if op["type"] == "triangle":
-                pts = [tuple(p) for p in op["points"]]
-                draw.polygon(pts, fill=tuple(op["color"]))
-        return canvas
-
-    rendered = render_symbols(symbolic)
-    st.image(rendered, caption="Rendered Symbolic Image", use_column_width=True)
-
-    # ---------------- Download ---------------- #
-    buffer = BytesIO()
-    with zipfile.ZipFile(buffer, "w") as zf:
-        zf.writestr("symbolic.json", json.dumps(symbolic, indent=2))
-    st.download_button(
-        label="Download symbolic.zip",
-        data=buffer.getvalue(),
-        file_name="symbolic.zip",
-        mime="application/zip"
-    )
+if uploaded_json:
+    symbolic_data = json.load(uploaded_json)
+    
+    # Determine canvas size
+    max_x = max(op["coords"][2] if "coords" in op else 0 for op in symbolic_data)
+    max_y = max(op["coords"][3] if "coords" in op else 0 for op in symbolic_data)
+    
+    canvas = Image.new("RGB", (max_x, max_y), (0,0,0))
+    draw = ImageDraw.Draw(canvas)
+    
+    for op in symbolic_data:
+        color = tuple(op["color"])
+        if op["type"] == "rectangle":
+            draw.rectangle(op["coords"], fill=color)
+        elif op["type"] == "triangle":
+            draw.polygon([tuple(p) for p in op["points"]], fill=color)
+        elif op["type"] == "polygon":
+            draw.polygon([tuple(p) for p in op["points"]], fill=color)
+    
+    st.image(canvas, caption="Decoded Image", use_column_width=True)
+    buf = io.BytesIO()
+    canvas.save(buf, format="PNG")
+    buf.seek(0)
+    st.download_button("Download PNG", data=buf, file_name="decoded.png", mime="image/png")
