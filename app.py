@@ -1,113 +1,101 @@
-# filename: app.py
 import streamlit as st
-from PIL import Image, ImageDraw
+from PIL import Image
 import numpy as np
 import json
 import io
 
-st.set_page_config(page_title="Symbolic Image Codec", layout="wide")
-
-st.title("🖼️ Symbolic Image Encoder & Decoder")
-
 # -----------------------------
 # Helper functions
 # -----------------------------
-def convert_for_json(obj):
-    """Recursively convert NumPy numbers/arrays and tuples to Python types"""
-    if isinstance(obj, dict):
-        return {k: convert_for_json(v) for k, v in obj.items()}
-    elif isinstance(obj, (list, tuple, np.ndarray)):
-        return [convert_for_json(v) for v in obj]
-    elif isinstance(obj, (np.integer,)):
-        return int(obj)
-    elif isinstance(obj, (np.floating,)):
-        return float(obj)
-    return obj
 
-def encode_image(img: Image.Image):
-    """Encode an image to symbolic JSON (triangles demo)"""
-    img = img.convert("RGB")
-    w, h = img.size
-    arr = np.array(img)
+def quantize_image(img, num_colors=4):
+    """
+    Reduce image to num_colors using Pillow quantization
+    """
+    img_small = img.convert("RGB").quantize(colors=num_colors, method=Image.MEDIANCUT)
+    palette = img_small.getpalette()[:num_colors*3]  # flat list of RGBs
+    palette_rgb = [tuple(palette[i:i+3]) for i in range(0, len(palette), 3)]
+    data = np.array(img_small)
+    return palette_rgb, data
 
-    symbolic = []
-    # Simple demo: split into 9x9 pixel blocks as triangles
-    block_size = 9
-    for y in range(0, h, block_size):
-        for x in range(0, w, block_size):
-            block = arr[y:y+block_size, x:x+block_size]
-            # Average color of the block
-            avg_color = tuple(map(int, block.reshape(-1,3).mean(axis=0)))
-            # Triangle coordinates
-            triangle = {
-                "type": "triangle",
-                "color": avg_color,
-                "points": [
-                    [x, y],
-                    [min(x+block_size, w), y],
-                    [x + block_size//2, min(y+block_size, h)]
-                ]
-            }
-            symbolic.append(triangle)
-    return symbolic, w, h
+def encode_to_json(img, num_colors=4, downscale=16):
+    """
+    Encode image to compact JSON
+    """
+    img_small = img.resize((downscale, downscale))
+    palette, indices = quantize_image(img_small, num_colors=num_colors)
+    
+    symbolic = {
+        "width": downscale,
+        "height": downscale,
+        "palette": palette,
+        "pixels": indices.tolist()
+    }
+    
+    json_bytes = json.dumps(symbolic, separators=(',', ':')).encode()
+    return symbolic, json_bytes
 
-def render_symbols(symbolic, width=None, height=None):
-    """Render symbolic JSON into a PIL Image"""
-    # Determine canvas size if not provided
-    if width is None or height is None:
-        max_x = max(max(p[0] for p in op["points"]) for op in symbolic) + 1
-        max_y = max(max(p[1] for p in op["points"]) for op in symbolic) + 1
-    else:
-        max_x, max_y = width, height
-
-    canvas = Image.new("RGB", (max_x, max_y), (0,0,0))
-    draw = ImageDraw.Draw(canvas)
-    for op in symbolic:
-        color = tuple(map(int, op["color"]))
-        if op["type"] == "triangle":
-            points = [tuple(map(int, p)) for p in op["points"]]
-            draw.polygon(points, fill=color)
-        # Add more types here if needed
-    return canvas
+def decode_from_json(symbolic, upscale=32):
+    """
+    Decode JSON back to image
+    """
+    width = symbolic["width"]
+    height = symbolic["height"]
+    palette = symbolic["palette"]
+    pixels = np.array(symbolic["pixels"], dtype=np.uint8)
+    
+    img_array = np.zeros((height, width, 3), dtype=np.uint8)
+    for i in range(height):
+        for j in range(width):
+            img_array[i,j] = palette[pixels[i,j]]
+    
+    img = Image.fromarray(img_array)
+    img_up = img.resize((upscale, upscale), Image.NEAREST)
+    return img_up
 
 # -----------------------------
-# Encode Section
+# Streamlit App
 # -----------------------------
-st.header("1️⃣ Upload an Image to Encode")
-uploaded_file = st.file_uploader("Choose an image file", type=["jpg","jpeg","png"])
-if uploaded_file:
+
+st.title("Compact Image Encoder (~1 KB)")
+
+st.markdown("""
+Upload an image to encode it into a tiny JSON representation (~1 KB for small images) 
+and decode it back to a PNG.
+""")
+
+# Upload image
+uploaded_file = st.file_uploader("Upload an Image", type=["png","jpg","jpeg"])
+if uploaded_file is not None:
     img = Image.open(uploaded_file)
     st.image(img, caption="Original Image", use_column_width=True)
     
-    if st.button("Encode Image to JSON"):
-        symbolic, w, h = encode_image(img)
-        symbolic_clean = convert_for_json(symbolic)
-        json_bytes = json.dumps(symbolic_clean, indent=2).encode()
-        st.success(f"Image encoded successfully! Symbolic items: {len(symbolic)}")
-        st.download_button(
-            label="Download JSON",
-            data=json_bytes,
-            file_name="symbolic.json",
-            mime="application/json"
-        )
+    # Encode
+    symbolic, json_bytes = encode_to_json(img, num_colors=4, downscale=16)
+    st.success(f"Image encoded successfully! JSON size: {len(json_bytes)} bytes")
+    
+    # Download JSON
+    st.download_button(
+        label="Download Encoded JSON",
+        data=json_bytes,
+        file_name="encoded_image.json",
+        mime="application/json"
+    )
 
-# -----------------------------
-# Decode Section
-# -----------------------------
-st.header("2️⃣ Upload Symbolic JSON to Decode")
-json_file = st.file_uploader("Choose a symbolic JSON file", type=["json"], key="json_decode")
-if json_file:
-    symbolic_data = json.load(json_file)
-    canvas = render_symbols(symbolic_data)
+# Upload JSON to decode
+uploaded_json = st.file_uploader("Upload Symbolic JSON to Decode", type=["json"])
+if uploaded_json is not None:
+    symbolic_data = json.load(uploaded_json)
+    canvas = decode_from_json(symbolic_data, upscale=128)
     st.image(canvas, caption="Decoded Image", use_column_width=True)
     
-    # Prepare PNG for download
+    # Download PNG
     buf = io.BytesIO()
     canvas.save(buf, format="PNG")
-    buf.seek(0)
+    byte_im = buf.getvalue()
     st.download_button(
-        label="Download PNG",
-        data=buf,
-        file_name="decoded.png",
+        label="Download Decoded PNG",
+        data=byte_im,
+        file_name="decoded_image.png",
         mime="image/png"
     )
